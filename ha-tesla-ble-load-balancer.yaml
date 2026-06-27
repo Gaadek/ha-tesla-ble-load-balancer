@@ -30,7 +30,7 @@ blueprint:
           domain: switch
 
     charging_state_sensor:
-      name: Charging state sensor
+      name: Charging state
       default: sensor.tesla_ble_charging_state
       selector:
         entity:
@@ -119,12 +119,6 @@ blueprint:
       selector:
         time:
 
-    charge_mode_entity:
-      name: Charge mode selector
-      selector:
-        entity:
-          domain: input_select
-
     off_peak_days:
       name: Off-peak days
       description: >
@@ -148,6 +142,12 @@ blueprint:
               value: "sat"
             - label: Sunday
               value: "sun"
+
+    charge_mode_entity:
+      name: Charge mode selector
+      selector:
+        entity:
+          domain: input_select
 
 triggers:
   - trigger: time_pattern
@@ -180,7 +180,7 @@ action:
       charging_state: "{{ states(charging_state_sensor) | lower }}"
 
   - condition: template
-    value_template: "{{ charging_state not in ['unknown', 'disconnected', 'no power', 'completed'] }}"
+    value_template: "{{ charging_state not in ['unknown', 'disconnected', 'no power', 'complete'] }}"
 
 
   #---------------------------------------------------------------------------------
