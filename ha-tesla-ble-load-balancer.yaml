@@ -1,0 +1,331 @@
+blueprint:
+  name: Tesla BLE load balancer
+  description: |
+    Dynamic EV charging with Tesla BLE.
+    Key features:
+    * Load balancing: ensure power consumption does not exceed contracted power by adjusting charging current
+    * Charge mode (solar: chage only with solar power; eco: charge with solar power and during off pead periods; boost: charge at max available power)
+
+  domain: automation
+  input:
+    status_sensor:
+      name: Tesla BLE status
+      default: binary_sensor.tesla_ble_status
+      selector:
+        entity:
+          domain: binary_sensor
+
+    asleep_sensor:
+      name: Asleep sensor
+      default: binary_sensor.tesla_ble_asleep
+      selector:
+        entity:
+          domain: binary_sensor
+
+    charger_switch:
+      name: Charger
+      default: switch.tesla_ble_charger
+      selector:
+        entity:
+          domain: switch
+
+    charging_state_sensor:
+      name: Charging state sensor
+      default: sensor.tesla_ble_charging_state
+      selector:
+        entity:
+          domain: sensor
+
+    charge_current_sensor:
+      name: Measured charging current
+      default: sensor.tesla_ble_charge_current
+      selector:
+        entity:
+          domain: sensor
+
+    charging_amps_number:
+      name: Charging current control
+      default: number.tesla_ble_charging_amps
+      selector:
+        entity:
+          domain: number
+
+    max_amps:
+      name: Max charging current
+      default: 20
+      selector:
+        number:
+          min: 5
+          max: 32
+
+    min_amps:
+      name: Min charging current
+      default: 6
+      selector:
+        number:
+          min: 1
+          max: 32
+
+    hysteresis:
+      name: Hysteresis power
+      default: 300
+      selector:
+        number:
+          min: 0
+          max: 2000
+
+    voltage:
+      name: Voltage
+      default: 230
+      selector:
+        number:
+          min: 100
+          max: 240
+          step: 10
+
+    home_power_sensor:
+      name: Home power sensor
+      default: sensor.shellyemg3_em1_power
+      selector:
+        entity:
+          domain: sensor
+          device_class: power
+
+    peak_max_grid_power:
+      name: Max grid power during peak period
+      default: 5000
+      selector:
+        number:
+          min: 0
+          max: 15000
+          step: 100
+
+    off_peak_max_grid_power:
+      name: Max grid power during off-peak period
+      default: 5000
+      selector:
+        number:
+          min: 0
+          max: 15000
+          step: 100
+
+    off_peak_start_time:
+      name: Off-peak start time
+      selector:
+        time:
+
+    off_peak_stop_time:
+      name: Off-peak stop time
+      selector:
+        time:
+
+    charge_mode_entity:
+      name: Charge mode selector
+      selector:
+        entity:
+          domain: input_select
+
+    off_peak_days:
+      name: Off-peak days
+      description: >
+        Select the days of the week when the 'off-peak' mode is active.
+      default: [mon, tue, wed, thu, fri, sat, sun]
+      selector:
+        select:
+          multiple: true
+          options:
+            - label: Monday
+              value: "mon"
+            - label: Tuesday
+              value: "tue"
+            - label: Wednesday
+              value: "wed"
+            - label: Thursday
+              value: "thu"
+            - label: Friday
+              value: "fri"
+            - label: Saturday
+              value: "sat"
+            - label: Sunday
+              value: "sun"
+
+triggers:
+  - trigger: time_pattern
+    minutes: "/1"
+
+  - trigger: state
+    entity_id: !input charge_mode_entity
+
+  - trigger: state
+    entity_id: !input charging_state_sensor
+
+action:
+  #---------------------------------------------------------------------------------
+  # Tesla BLE device must be connected to the car
+  #---------------------------------------------------------------------------------
+
+  - variables:
+      status_sensor: !input status_sensor
+
+  - condition: template
+    value_template: "{{ states(status_sensor) | lower == 'on' }}"
+
+
+  #---------------------------------------------------------------------------------
+  # Tesla BLE device must be in a state allowing the charge control
+  #---------------------------------------------------------------------------------
+
+  - variables:
+      charging_state_sensor: !input charging_state_sensor
+      charging_state: "{{ states(charging_state_sensor) | lower }}"
+
+  - condition: template
+    value_template: "{{ charging_state not in ['unknown', 'disconnected', 'no power', 'completed'] }}"
+
+
+  #---------------------------------------------------------------------------------
+  # Continue automation execution if:
+  # - Charge mode allows to start the charge and there is enough available power
+  # - Charge is already in progress so we might have to adjust the charge
+  #---------------------------------------------------------------------------------
+
+  - variables:
+      # Anti threshold limits
+      min_amps: !input min_amps
+      voltage: !input voltage
+      hysteresis: !input hysteresis
+
+      start_threshold: "{{ (min_amps * voltage) + hysteresis }}"
+      stop_threshold: "{{ (min_amps * voltage) }}"
+
+
+      # Evaluate if we are in peak/off peak period
+      off_peak_days: !input off_peak_days
+
+      off_peak_start_time: !input off_peak_start_time
+      start: "{{ strptime(off_peak_start_time, '%H:%M:%S').time() }}"
+
+      off_peak_stop_time: !input off_peak_stop_time
+      stop: "{{ strptime(off_peak_stop_time, '%H:%M:%S').time() }}"
+
+      current_day: "{{ ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'][now().weekday()] }}"
+      cur_time: "{{ now().time() }}"
+
+      is_off_peak_period: >-
+        {% if start < stop %}
+          {{ current_day in off_peak_days and start <= cur_time < stop }}
+        {% else %}
+          {{ current_day in off_peak_days and (cur_time >= start or cur_time < stop) }}
+        {% endif %}
+
+
+      # Actual grid power limit
+      off_peak_max_grid_power: !input off_peak_max_grid_power
+      peak_max_grid_power: !input peak_max_grid_power
+
+      grid_limit: >-
+        {% if is_off_peak_period %}
+          {{ off_peak_max_grid_power }}
+        {% else %}
+          {{ peak_max_grid_power }}
+        {% endif %}
+
+      # Available power is the current grid limit (based on the charge mode and the actual time) - the home power consumption
+      charge_mode_entity: !input charge_mode_entity
+      charge_mode: "{{ states(charge_mode_entity) | lower }}"
+
+      home_power_sensor: !input home_power_sensor
+      home_power: "{{ states(home_power_sensor) | float(0) }}"
+
+      available_power: >-
+        {% if charge_mode == 'solar' or (charge_mode == 'eco' and not is_off_peak_period) %}
+          {{ [0, -home_power] | max }}
+        {% elif charge_mode == 'eco' and is_off_peak_period or charge_mode == 'boost' %}
+          {{ [0, grid_limit - home_power] | max }}
+        {% else %}
+          0
+        {% endif %}
+
+      is_charging: "{{ charging_state == 'charging' }}"
+
+  - condition: template
+    value_template: >
+      {{
+              is_charging
+          or  available_power > start_threshold
+      }}
+
+  #---------------------------------------------------------------------------------
+  # Evaluate charging current
+  #---------------------------------------------------------------------------------
+
+  - variables:
+      # Actual charging power
+      charge_current_sensor: !input charge_current_sensor
+      charging_current: "{{ states(charge_current_sensor) | float(0) }}"
+      charging_power: "{{ charging_current * voltage }}"
+
+      max_amps: !input max_amps
+
+      # Available charging power is the total available power for charing the EV.
+      # This is the grid limit - the available grid power + the actual charging power
+      available_charging_power: >-
+        {% if charge_mode == 'solar' or (charge_mode == 'eco' and not is_off_peak_period) %}
+          {{ [0, -home_power + charging_power] | max }}
+        {% elif charge_mode == 'eco' and is_off_peak_period or charge_mode == 'boost' %}
+          {{ [0, grid_limit - home_power + charging_power] | max }}
+        {% else %}
+          0
+        {% endif %}
+
+      # Determine the new charging current corresponding to the available charging power
+      new_charging_current: >-
+        {% set tmp = (available_charging_power / voltage) | int %}
+
+        {% if tmp > max_amps %}
+          {{ max_amps }}
+        {% elif tmp < min_amps %}
+          0
+        {% else %}
+          {{ tmp }}
+        {% endif %}
+
+      step_size: >-
+        {% set diff = (new_charging_current - charging_current) | abs %}
+
+        {% if diff > 5 %}
+          3
+        {% elif diff > 2 %}
+          2
+        {% else %}
+          1
+        {% endif %}
+
+      should_update: "{{ (new_charging_current - charging_current) | abs >= 1 }}"
+
+  - service: >
+      {% if new_charging_current >= min_amps %}
+        switch.turn_on
+      {% else %}
+        switch.turn_off
+      {% endif %}
+    target:
+      entity_id: !input charger_switch
+
+  - condition: template
+    value_template: "{{ should_update }}"
+
+  - service: number.set_value
+    target:
+      entity_id: !input charging_amps_number
+    data:
+      value: >-
+        {% if charging_current < new_charging_current %}
+          {{ [charging_current + step_size, new_charging_current] | min }}
+        {% elif charging_current > new_charging_current %}
+          {{ [charging_current - step_size, 0] | max }}
+        {% else %}
+          {{ new_charging_current }}
+        {% endif %}
+
+mode: restart
